@@ -1,0 +1,94 @@
+name: QA check
+
+# Checks out the target repository and runs the same gates as its own CI, on several Python versions.
+# Every step runs even if an earlier one failed, so one run shows all real errors at once.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Repository to check (owner/name)"
+        default: "carlsberk/OpsPulse-AI-Autonomous-Incident-Response-RCA-Agent"
+      target_ref:
+        description: "Branch, tag or commit to check"
+        default: "main"
+      apply_patch:
+        description: "Apply patches/fix-tests-and-coverage.patch before testing"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPO: ${{ inputs.target_repo || 'carlsberk/OpsPulse-AI-Autonomous-Incident-Response-RCA-Agent' }}
+  TARGET_REF: ${{ inputs.target_ref || 'main' }}
+
+jobs:
+  qa:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out QA repo
+        uses: actions/checkout@v4
+
+      - name: Check out target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_REF }}
+          path: target
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: target/requirements*.txt
+
+      - name: Apply patch
+        if: ${{ inputs.apply_patch }}
+        working-directory: target
+        run: git apply --verbose ../patches/fix-tests-and-coverage.patch
+
+      - name: Install dependencies
+        working-directory: target
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff lint
+        if: always()
+        working-directory: target
+        run: ruff check src tests evals scripts migrations
+
+      - name: Ruff format
+        if: always()
+        working-directory: target
+        run: ruff format --check src tests evals scripts migrations
+
+      - name: Mypy
+        if: always()
+        working-directory: target
+        run: mypy
+
+      - name: Unit tests with coverage
+        if: always()
+        working-directory: target
+        run: pytest --cov=src --cov=evals --cov-report=term-missing:skip-covered --cov-report=xml --cov-fail-under=84
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### QA: ${TARGET_REPO}@${TARGET_REF} on Python ${{ matrix.python }}"
+            echo "Patch applied: ${{ inputs.apply_patch || false }}"
+            echo "Job status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
