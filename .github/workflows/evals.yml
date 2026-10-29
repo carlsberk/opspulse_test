@@ -1,0 +1,131 @@
+name: Evals (RCA, retrieval, ask)
+
+# Runs the target repo's own evaluation suites and compares them with its stored baselines.
+#  - mock mode: deterministic, no credentials; fails on any regression against evals/baselines.
+#  - live mode (opt-in): runs a SMALL slice against the real Groq model. Needs the repo secret GROQ_API_KEY.
+#    One live run costs roughly 100-125k tokens for a full dataset, so the default is a single case.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch, tag or commit of the target repo"
+        default: "main"
+      live:
+        description: "Also run a live slice against the real model (needs secret GROQ_API_KEY)"
+        type: boolean
+        default: false
+      live_dataset:
+        description: "Live RCA dataset: tuning, holdout, adversarial, callers, reviewer_memory"
+        default: "holdout"
+      live_case:
+        description: "Live RCA case id (one case keeps token use low)"
+        default: "ho-off-by-one"
+  schedule:
+    - cron: "30 5 * * *" # daily mock run, 05:30 UTC
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPO: carlsberk/OpsPulse-AI-Autonomous-Incident-Response-RCA-Agent
+  TARGET_REF: ${{ inputs.target_ref || 'main' }}
+
+jobs:
+  mock:
+    name: Mock evals vs baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_REF }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: RCA evals (all datasets) and regression check
+        run: |
+          status=0
+          for ds in tuning holdout adversarial callers reviewer_memory; do
+            echo "::group::RCA mock: $ds"
+            python -m evals.run_rca --mode mock --dataset "$ds" || status=1
+            report=$(ls -t evals/reports/rca-"$ds"-mock-*.json | head -1)
+            python -m evals.compare_reports "evals/baselines/rca-$ds-mock.json" "$report" --fail-on-regression || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Retrieval eval
+        if: always()
+        run: python -m evals.run_retrieval
+
+      - name: Incident assistant (ask) eval
+        if: always()
+        run: python -m evals.ask_eval --mode mock
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Evals: ${TARGET_REPO}@${TARGET_REF}"
+            for f in $(ls evals/reports/*.md 2>/dev/null); do
+              echo; echo "### $(basename "$f")"; head -30 "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports-mock
+          path: evals/reports/
+
+  live:
+    name: Live slice (real model)
+    if: ${{ inputs.live }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require the API key
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::error::Repo secret GROQ_API_KEY is not set (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_REF }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Live RCA slice
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          LIVE_DATASET: ${{ inputs.live_dataset }}
+          LIVE_CASE: ${{ inputs.live_case }}
+        run: python -m evals.run_rca --mode live --dataset "$LIVE_DATASET" --case "$LIVE_CASE" --sleep 20
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports-live
+          path: evals/reports/
