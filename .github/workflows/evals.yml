@@ -123,6 +123,38 @@ jobs:
           LIVE_CASE: ${{ inputs.live_case }}
         run: python -m evals.run_rca --mode live --dataset "$LIVE_DATASET" --case "$LIVE_CASE" --sleep 20
 
+      - name: Publish the live result as annotations
+        if: always()
+        run: |
+          python - <<'PY'
+          import glob, json, os
+          files = sorted(glob.glob("evals/reports/rca-*-live-*.json"), key=os.path.getmtime)
+          if not files:
+              print("::warning title=Live eval::no live report was written")
+              raise SystemExit(0)
+          report = json.load(open(files[-1]))
+          meta = report.get("run_metadata", {})
+          print(f"::notice title=Live run::model={meta.get('model')} prompt={meta.get('prompt_version')} "
+                f"dataset={report.get('dataset_version')} cases={len(report['results'])}")
+          for r in report["results"]:
+              exp = r["expected"]
+              attempts = r.get("attempts", [])
+              tokens_in = sum(a.get("input_tokens") or 0 for a in attempts)
+              tokens_out = sum(a.get("output_tokens") or 0 for a in attempts)
+              checks = sorted({c for a in attempts for c in a.get("failed_checks", [])})
+              level = "notice" if r["workflow_status"] == "accepted" else "warning"
+              print(f"::{level} title=Case {r['case_id']}::status={r['workflow_status']} gate={r['gate_passed']} "
+                    f"score={r.get('quality_score')} expected={exp['root_cause_category']} "
+                    f"predicted={r['predicted_category']} inconclusive_expected={exp['inconclusive']} "
+                    f"declared_insufficient={r['declared_insufficient']} attempts={len(attempts)} "
+                    f"quotes={r['grounded_quotes']}/{r['observed_quotes']} tokens={tokens_in}/{tokens_out} "
+                    f"error={r.get('error_category')} failed_checks={','.join(checks) or '-'}")
+          metrics = report.get("metrics", {})
+          keys = ("category_accuracy", "evidence_grounding_accuracy", "structured_output_validity",
+                  "false_acceptance_rate", "unsupported_claim_rate", "abstention_recall")
+          print("::notice title=Live metrics::" + " ".join(f"{k}={metrics.get(k)}" for k in keys))
+          PY
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
