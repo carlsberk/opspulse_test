@@ -152,7 +152,11 @@ jobs:
           metrics = report.get("metrics", {})
           keys = ("category_accuracy", "evidence_grounding_accuracy", "structured_output_validity",
                   "false_acceptance_rate", "unsupported_claim_rate", "abstention_recall")
-          print("::notice title=Live metrics::" + " ".join(f"{k}={metrics.get(k)}" for k in keys))
+          def fmt(m):
+              if isinstance(m, dict):
+                  return f"{m.get('value')} ({m.get('numerator')}/{m.get('denominator')})"
+              return str(m)
+          print("::notice title=Live metrics::" + " ".join(f"{k}={fmt(metrics.get(k))}" for k in keys))
           PY
 
       - name: Upload reports
