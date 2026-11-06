@@ -19,8 +19,8 @@ on:
         description: "Live RCA dataset: tuning, holdout, adversarial, callers, reviewer_memory"
         default: "holdout"
       live_case:
-        description: "Live RCA case id (one case keeps token use low)"
-        default: "ho-off-by-one"
+        description: "Live RCA case id; leave EMPTY to run the whole dataset"
+        default: ""
   schedule:
     - cron: "30 5 * * *" # daily mock run, 05:30 UTC
 
@@ -121,7 +121,10 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           LIVE_DATASET: ${{ inputs.live_dataset }}
           LIVE_CASE: ${{ inputs.live_case }}
-        run: python -m evals.run_rca --mode live --dataset "$LIVE_DATASET" --case "$LIVE_CASE" --sleep 20
+        run: |
+          args=(--mode live --dataset "$LIVE_DATASET" --sleep 20)
+          if [ -n "$LIVE_CASE" ]; then args+=(--case "$LIVE_CASE"); fi
+          python -m evals.run_rca "${args[@]}"
 
       - name: Publish the live result as annotations
         if: always()
@@ -136,19 +139,22 @@ jobs:
           meta = report.get("run_metadata", {})
           print(f"::notice title=Live run::model={meta.get('model')} prompt={meta.get('prompt_version')} "
                 f"dataset={report.get('dataset_version')} cases={len(report['results'])}")
+          lines = []
           for r in report["results"]:
               exp = r["expected"]
               attempts = r.get("attempts", [])
               tokens_in = sum(a.get("input_tokens") or 0 for a in attempts)
               tokens_out = sum(a.get("output_tokens") or 0 for a in attempts)
               checks = sorted({c for a in attempts for c in a.get("failed_checks", [])})
-              level = "notice" if r["workflow_status"] == "accepted" else "warning"
-              print(f"::{level} title=Case {r['case_id']}::status={r['workflow_status']} gate={r['gate_passed']} "
-                    f"score={r.get('quality_score')} expected={exp['root_cause_category']} "
-                    f"predicted={r['predicted_category']} inconclusive_expected={exp['inconclusive']} "
-                    f"declared_insufficient={r['declared_insufficient']} attempts={len(attempts)} "
-                    f"quotes={r['grounded_quotes']}/{r['observed_quotes']} tokens={tokens_in}/{tokens_out} "
-                    f"error={r.get('error_category')} failed_checks={','.join(checks) or '-'}")
+              lines.append(
+                  f"{r['case_id']}: status={r['workflow_status']} gate={r['gate_passed']} score={r.get('quality_score')} "
+                  f"expected={exp['root_cause_category']} predicted={r['predicted_category']} "
+                  f"inconclusive_expected={exp['inconclusive']} declared_insufficient={r['declared_insufficient']} "
+                  f"attempts={len(attempts)} quotes={r['grounded_quotes']}/{r['observed_quotes']} "
+                  f"tokens={tokens_in}/{tokens_out} error={r.get('error_category')} checks={','.join(checks) or '-'}"
+              )
+          body = "%0A".join(lines)
+          print(f"::notice title=Live cases ({len(lines)})::{body}")
           metrics = report.get("metrics", {})
           keys = ("category_accuracy", "evidence_grounding_accuracy", "structured_output_validity",
                   "false_acceptance_rate", "unsupported_claim_rate", "abstention_recall")
